@@ -1,16 +1,106 @@
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from pathlib import Path
 from datetime import datetime, timedelta
-import os
 
-from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL
+PROJECT_ROOT = Path(__file__).resolve().parent
+GOLD_ROOT = PROJECT_ROOT / "data" / "gold"
 
-from utils.database_loader import load_all_datasets, validate_datasets
+GOLD_DATASETS = [
+    "order_facts",
+    "order_line_revenue",
+    "daily_revenue",
+    "daily_orders",
+    "products",
+    "product_daily",
+    "revenue_by_category",
+    "session_facts",
+    "customer_behaviour",
+    "funnel_daily",
+    "revenue_allocation_check",
+]
+
+def read_parquet_folder(folder: Path) -> pd.DataFrame:
+    """Read Spark Parquet part-files from a dataset folder."""
+    if not folder.exists():
+        raise FileNotFoundError(f"Dataset folder not found: {folder}")
+    files = [
+        f for f in folder.rglob("*.parquet")
+        if not f.name.endswith(".crc") and not f.name.startswith("._")
+    ]
+    if not files:
+        raise FileNotFoundError(f"No Parquet files found in: {folder}")
+    frames = [pd.read_parquet(file) for file in files]
+    return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+@st.cache_data(show_spinner="Loading Gold Parquet datasets...")
+def load_all_datasets():
+    loaded = {}
+    for name in GOLD_DATASETS:
+        loaded[name] = read_parquet_folder(GOLD_ROOT / name)
+    return loaded
+
+def validate_datasets(data):
+    rows = []
+    for name, frame in data.items():
+        rows.append({
+            "dataset": name,
+            "rows": len(frame),
+            "columns": len(frame.columns),
+            "missing_values": int(frame.isna().sum().sum()),
+            "duplicate_rows": int(frame.duplicated().sum()) if not frame.empty else 0,
+        })
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_streaming_snapshot():
+    """Read Member 2's validated Parquet output when it is included in the repo."""
+    candidates = [
+        PROJECT_ROOT / "member2_spark_streaming" / "member2_spark_streaming" / "data" / "lake" / "validated_events",
+        PROJECT_ROOT / "member2_spark_streaming" / "data" / "lake" / "validated_events",
+        PROJECT_ROOT / "data" / "validated_events",
+    ]
+    event_files = []
+    for folder in candidates:
+        if folder.exists():
+            event_files.extend(
+                f for f in folder.rglob("*.parquet")
+                if not f.name.endswith(".crc") and not f.name.startswith("._")
+            )
+    if not event_files:
+        raise FileNotFoundError(
+            "Member 2 validated-events Parquet files were not found in the repository."
+        )
+    frames = [pd.read_parquet(file) for file in event_files]
+    recent = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    total = len(recent)
+    if "event_type" in recent.columns:
+        event_counts = (
+            recent["event_type"].fillna("Unknown").value_counts()
+            .rename_axis("event_type").reset_index(name="event_count")
+        )
+    else:
+        event_counts = pd.DataFrame(columns=["event_type", "event_count"])
+    timestamp_column = (
+        "event_timestamp" if "event_timestamp" in recent.columns
+        else "event_date" if "event_date" in recent.columns
+        else None
+    )
+    per_minute = pd.DataFrame()
+    if timestamp_column:
+        recent[timestamp_column] = pd.to_datetime(recent[timestamp_column], errors="coerce")
+        if timestamp_column == "event_timestamp":
+            per_minute = (
+                recent.dropna(subset=[timestamp_column])
+                .set_index(timestamp_column)
+                .resample("1min").size()
+                .rename("event_count").reset_index()
+                .rename(columns={timestamp_column: "event_minute"})
+            )
+    if timestamp_column:
+        recent = recent.sort_values(timestamp_column, ascending=False, na_position="last")
+    return total, recent.head(500), event_counts, per_minute, list(recent.columns)
 
 
 # =========================================================
@@ -120,25 +210,27 @@ hr {
 
 
 # =========================================================
-# 3. LOAD GOLD DATA
+# 3. LOAD GOLD DATA FROM LOCAL REPOSITORY PARQUET FILES
 # =========================================================
 
 @st.cache_data(show_spinner="Loading E-Commerce datasets...")
 def get_data():
     return load_all_datasets()
 
-
 def refresh_data():
     get_data.clear()
+    load_streaming_snapshot.clear()
     st.rerun()
-
 
 try:
     data = get_data()
-
 except Exception as error:
-    st.error("Unable to load the Gold datasets.")
+    st.error("Unable to load the Gold datasets from data/gold.")
     st.exception(error)
+    st.info(
+        "Check that all 11 Gold dataset folders are committed under "
+        "data/gold/ and that requirements.txt includes pyarrow."
+    )
     st.stop()
 
 
@@ -217,106 +309,10 @@ def section_header(title, description=None):
 
 
 # =========================================================
-# 4A. STREAMING EVENTS CONNECTION
+# 4A. STREAMING EVENTS SOURCE
 # =========================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-load_dotenv(PROJECT_ROOT / ".env")
-
-
-@st.cache_resource
-def get_streaming_engine():
-    """Create a PostgreSQL engine using the same .env credentials."""
-    required = ["DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME"]
-    missing = [key for key in required if not os.getenv(key)]
-    if missing:
-        raise RuntimeError(
-            "Missing PostgreSQL settings in .env: " + ", ".join(missing)
-        )
-
-    database_url = URL.create(
-        drivername="postgresql+psycopg2",
-        username=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT")),
-        database=os.getenv("DB_NAME"),
-    )
-    return create_engine(database_url, pool_pre_ping=True)
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def load_streaming_snapshot():
-    """
-    Read the current streaming_events table.
-    Cache for 15 seconds to reduce repeated database queries.
-    """
-    engine = get_streaming_engine()
-    with engine.connect() as connection:
-        total = connection.execute(
-            text("SELECT COUNT(*) FROM public.streaming_events")
-        ).scalar_one()
-
-        columns_result = connection.execute(
-            text("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'streaming_events'
-                ORDER BY ordinal_position
-            """)
-        )
-        columns = [row[0] for row in columns_result.fetchall()]
-
-        if not columns:
-            raise RuntimeError(
-                "The public.streaming_events table was not found or has no columns."
-            )
-
-        # These fields were confirmed in the Member 2 Parquet schema.
-        timestamp_column = (
-            "event_timestamp" if "event_timestamp" in columns
-            else "event_date" if "event_date" in columns
-            else None
-        )
-
-        if timestamp_column:
-            recent_query = text(
-                f'SELECT * FROM public.streaming_events '
-                f'ORDER BY "{timestamp_column}" DESC NULLS LAST LIMIT 500'
-            )
-        else:
-            recent_query = text(
-                "SELECT * FROM public.streaming_events LIMIT 500"
-            )
-
-        recent = pd.read_sql(recent_query, connection)
-
-        event_counts = pd.read_sql(
-            text("""
-                SELECT event_type, COUNT(*) AS event_count
-                FROM public.streaming_events
-                GROUP BY event_type
-                ORDER BY event_count DESC
-            """),
-            connection,
-        )
-
-        per_minute = pd.DataFrame()
-        if timestamp_column == "event_timestamp":
-            per_minute = pd.read_sql(
-                text("""
-                    SELECT date_trunc('minute', event_timestamp) AS event_minute,
-                           COUNT(*) AS event_count
-                    FROM public.streaming_events
-                    WHERE event_timestamp >= NOW() - INTERVAL '60 minutes'
-                    GROUP BY 1
-                    ORDER BY 1
-                """),
-                connection,
-            )
-
-    return total, recent, event_counts, per_minute, columns
+# Streaming Monitor reads the committed Member 2 validated Parquet snapshot.
+# It does not require a PostgreSQL server or cloud database credentials.
 
 
 # =========================================================
@@ -378,8 +374,8 @@ with st.sidebar:
 
     st.markdown("#### DATA CONNECTION")
 
-    st.success("PostgreSQL Connected")
-    st.caption("Source: PostgreSQL 16 – ecommerce_analytics")
+    st.success("Gold Parquet Connected")
+    st.caption("Source: data/gold — 11 Gold datasets")
     st.button(
         "↻ Refresh Data",
         use_container_width=True,
@@ -958,8 +954,7 @@ elif selected_page == "Streaming Monitor":
 
     st.title("Streaming Monitor")
     st.caption(
-        "Monitor events ingested from Member 2's validated Parquet output "
-        "and stored in PostgreSQL."
+        "Inspect the validated event snapshot produced by Member 2."
     )
     st.divider()
 
@@ -970,8 +965,7 @@ elif selected_page == "Streaming Monitor":
             st.rerun()
     with info_col:
         st.caption(
-            "Data refreshes from PostgreSQL on page reruns; query results are "
-            "cached for up to 15 seconds."
+            "Reads the validated Parquet snapshot included in this repository."
         )
 
     try:
@@ -1054,19 +1048,16 @@ elif selected_page == "Streaming Monitor":
             st.info("The streaming_events table is currently empty.")
 
         st.caption(
-            "PostgreSQL table: public.streaming_events. "
-            "This page reflects the records currently stored in the table; "
-            "continuous live ingestion depends on Member 2's streaming job "
-            "continuing to write new Parquet output and the ingestion process "
-            "continuing to load it."
+            "Source: Member 2 validated-events Parquet snapshot. "
+            "This is a stored snapshot, not a continuously updating cloud stream."
         )
 
     except Exception as error:
         st.error("Unable to load streaming events from PostgreSQL.")
         st.exception(error)
         st.info(
-            "Check that the PostgreSQL container is running, the .env values "
-            "are correct, and public.streaming_events exists."
+            "Include Member 2's validated-events Parquet folder in the repository. "
+            "The other dashboard pages will continue to work without it."
         )
 
 
