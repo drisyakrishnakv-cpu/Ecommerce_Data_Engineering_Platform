@@ -1,0 +1,64 @@
+﻿        table_name        |          column_name           |          data_type          
+--------------------------+--------------------------------+-----------------------------
+ customer_behaviour       | customer_id                    | character varying
+ customer_behaviour       | total_events                   | integer
+ customer_behaviour       | sessions                       | integer
+ customer_behaviour       | orders_referenced              | integer
+ daily_orders             | event_date                     | date
+ daily_orders             | orders_with_purchase_events    | integer
+ daily_revenue            | payment_date                   | date
+ daily_revenue            | gross_paid_revenue             | numeric
+ daily_revenue            | refunds                        | numeric
+ daily_revenue            | cancelled_after_payment        | numeric
+ daily_revenue            | net_revenue                    | numeric
+ daily_revenue            | paid_orders                    | integer
+ funnel_daily             | event_date                     | date
+ funnel_daily             | search_sessions                | integer
+ funnel_daily             | view_sessions                  | integer
+ funnel_daily             | cart_sessions                  | integer
+ funnel_daily             | purchase_sessions              | integer
+ order_facts              | order_id                       | character varying
+ order_facts              | paid_amount                    | numeric
+ order_facts              | payment_timestamp              | timestamp without time zone
+ order_facts              | refund_amount                  | numeric
+ order_facts              | final_order_status             | character varying
+ order_facts              | cancelled_after_payment_amount | numeric
+ order_facts              | net_revenue                    | numeric
+ order_facts              | payment_date                   | date
+ order_line_revenue       | order_id                       | character varying
+ order_line_revenue       | product_id                     | character varying
+ order_line_revenue       | category                       | character varying
+ order_line_revenue       | line_gross                     | numeric
+ order_line_revenue       | order_line_gross               | numeric
+ order_line_revenue       | paid_amount                    | numeric
+ order_line_revenue       | payment_date                   | date
+ order_line_revenue       | net_revenue                    | numeric
+ order_line_revenue       | allocated_revenue              | numeric
+ product_daily            | payment_date                   | date
+ product_daily            | product_id                     | character varying
+ product_daily            | allocated_revenue              | numeric
+ products                 | product_id                     | character varying
+ products                 | allocated_revenue              | numeric
+ products                 | purchase_line_gross            | numeric
+ revenue_allocation_check | order_id                       | character varying
+ revenue_allocation_check | allocated_total                | numeric
+ revenue_allocation_check | net_revenue                    | numeric
+ revenue_allocation_check | allocation_difference          | numeric
+ revenue_by_category      | category                       | character varying
+ revenue_by_category      | allocated_revenue              | numeric
+ session_facts            | session_id                     | character varying
+ session_facts            | customer_id                    | character varying
+ session_facts            | event_count                    | integer
+ session_facts            | session_start                  | timestamp without time zone
+ session_facts            | session_end                    | timestamp without time zone
+ session_facts            | distinct_event_types           | integer
+ streaming_events         | event_id                       | text
+ streaming_events         | customer_id                    | text
+ streaming_events         | session_id                     | text
+ streaming_events         | event_type                     | text
+ streaming_events         | event_timestamp                | timestamp with time zone
+ streaming_events         | event_date                     | date
+ streaming_events         | payload                        | jsonb
+ streaming_events         | ingested_at                    | timestamp with time zone
+(60 rows)
+
